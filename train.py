@@ -9,9 +9,9 @@ def train():
     # 모델 정의 (PPO 알고리즘 사용)
     model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_carrier_tensorboard/")
 
-    # 학습 시작 (10만 스텝)
+    # 학습 시작 (100만 스텝으로 상향)
     print("Training started...")
-    model.learn(total_timesteps=100000)
+    model.learn(total_timesteps=1000000)
     
     # 모델 저장
     model.save("space_carrier_ppo")

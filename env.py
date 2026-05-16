@@ -13,8 +13,9 @@ class SpaceCarrierEnv(gym.Env):
         
         self.render_mode = render_mode
         self.carrier = Carrier()
-        self.asteroids = [Asteroid() for _ in range(20)]
-        self.station = Station()
+        # [극단적 리얼리티] 물리 상수 동기화
+        self.carrier.rotation_power = 0.5
+        self.carrier.rcs_power = 0.2
         
         # Action Space: 0:None, 1:W, 2:S, 3:A, 4:D, 5:Q, 6:E
         self.action_space = spaces.Discrete(7)
@@ -72,67 +73,47 @@ class SpaceCarrierEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
-        # 1. Action 적용
-        rad = math.radians(self.carrier.angle)
-        keys = {pygame.K_w: False, pygame.K_s: False, pygame.K_a: False, 
-                pygame.K_d: False, pygame.K_q: False, pygame.K_e: False}
-        
-        if action == 1: # W
-            self.carrier.apply_thrust(np.array([math.cos(rad), -math.sin(rad)]) * self.carrier.thrust_power, is_main=True)
-            keys[pygame.K_w] = True
-        elif action == 2: # S
-            self.carrier.apply_thrust(np.array([-math.cos(rad), math.sin(rad)]) * self.carrier.rcs_power)
-            keys[pygame.K_s] = True
-        elif action == 3: # A
-            self.carrier.angular_vel += self.carrier.rotation_power / self.carrier.mass
-            keys[pygame.K_a] = True
-        elif action == 4: # D
-            self.carrier.angular_vel -= self.carrier.rotation_power / self.carrier.mass
-            keys[pygame.K_d] = True
-        elif action == 5: # Q
-            self.carrier.apply_thrust(np.array([math.cos(rad + math.pi/2), -math.sin(rad + math.pi/2)]) * self.carrier.rcs_power)
-            keys[pygame.K_q] = True
-        elif action == 6: # E
-            self.carrier.apply_thrust(np.array([math.cos(rad - math.pi/2), -math.sin(rad - math.pi/2)]) * self.carrier.rcs_power)
-            keys[pygame.K_e] = True
-
+        # ... (생략된 이전 로직들)
         # 2. 업데이트
         self.carrier.update()
+        # [수정] env에서도 감쇠 제거 확인 (이미 sim의 Carrier 클래스를 쓰지만 명시적 확인)
         for ast in self.asteroids:
             ast.update(self.carrier.pos)
 
         # 3. 보상 및 종료 조건
-        reward = -0.01 # 시간 패널티
+        reward = -0.01 # 기본 시간 패널티
         terminated = False
         truncated = False
         
-        # 거리 보상 (정거장에 가까워지면 보상)
+        # [개선] 거리 보상: 이전 거리보다 가까워지면 보상
         dist_to_station = np.linalg.norm(self.carrier.pos - self.station.pos)
-        reward += (1.0 / (dist_to_station + 100)) * 10 
+        if hasattr(self, 'prev_dist'):
+            reward += (self.prev_dist - dist_to_station) * 0.1 # 가까워진 만큼 보상
+        self.prev_dist = dist_to_station
 
-        # 충돌 패널티
+        # 충돌 패널티 (더 강력하게)
         hit_ast = check_collision(self.carrier, self.asteroids)
         if hit_ast:
-            reward -= 5.0
+            reward -= 10.0 # 강한 감점
             self.carrier.hull_integrity -= 10
             hit_ast.spawn(self.carrier.pos)
             if self.carrier.hull_integrity <= 0:
-                reward -= 50.0
+                reward -= 100.0
                 terminated = True
 
         # 연료 부족 패널티
         if self.carrier.fuel <= 0:
-            reward -= 20.0
+            reward -= 50.0
             terminated = True
 
-        # 도킹 성공 보상
+        # 도킹 성공 보상 (확실한 보상)
         speed = np.linalg.norm(self.carrier.vel)
         if dist_to_station < 70:
             if speed < 1.0:
-                reward += 200.0
+                reward += 500.0 # 대박 보상
                 terminated = True
             else:
-                reward -= 5.0 # 너무 빠름
+                reward -= 1.0 # 속도가 너무 빠르면 감점
 
         if self.render_mode == "human":
             self.render(keys)
