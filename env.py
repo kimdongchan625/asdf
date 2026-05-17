@@ -10,44 +10,42 @@ class SpaceCarrierEnv(gym.Env):
 
     def __init__(self, render_mode=None):
         super(SpaceCarrierEnv, self).__init__()
-        
         self.render_mode = render_mode
         self.carrier = Carrier()
-        # [극단적 리얼리티] 물리 상수 동기화
-        self.carrier.rotation_power = 0.5
+        
+        # [초등학교 모드] 현실적인 물리로 복귀
+        self.carrier.rotation_power = 1.0 # 약간 묵직하게 유지
         self.carrier.rcs_power = 0.2
         
-        # Action Space: 0:None, 1:W, 2:S, 3:A, 4:D, 5:Q, 6:E
-        self.action_space = spaces.Discrete(7)
+        # 소행성 5개 도입 (장애물 연습)
+        self.asteroids = [Asteroid() for _ in range(5)] 
+        self.station = Station()
         
-        # Observation Space (AI가 보는 정보)
-        # 1. 속도 (vx, vy)
-        # 2. 각속도
-        # 3. 각도 (sin, cos)
-        # 4. 연료 및 장갑
-        # 5. 스테이션 상대 위치 (dx, dy)
-        # 6. 가장 가까운 소행성 5개의 상대 위치 (dx, dy)
+        self.max_steps = 1500 # 좀 더 긴 시간 제공
+        self.current_step = 0
+        
+        self.action_space = spaces.Discrete(7)
         low = np.array([-1, -1, -1, -1, -1, 0, 0, -1, -1] + [-1, -1] * 5, dtype=np.float32)
         high = np.array([1, 1, 1, 1, 1, 1, 1, 1, 1] + [1, 1] * 5, dtype=np.float32)
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
         self.screen = None
         self.clock = None
+        self.prev_dist = 0.0
 
     def _get_obs(self):
-        # 정규화된 관측값 생성
         rad = math.radians(self.carrier.angle)
-        rel_station = (self.station.pos - self.carrier.pos) / 3000.0 # 최대 거리로 정규화
+        rel_station = (self.station.pos - self.carrier.pos) / 3500.0
         
-        # 소행성 거리 순 정렬
+        # 소행성 데이터 복구
         ast_rel_positions = []
         for ast in self.asteroids:
-            rel = (ast.pos - self.carrier.pos) / 2000.0
+            rel = (ast.pos - self.carrier.pos) / 2500.0
             ast_rel_positions.append(rel)
         ast_rel_positions.sort(key=lambda x: np.linalg.norm(x))
         nearest_asts = ast_rel_positions[:5]
         while len(nearest_asts) < 5:
-            nearest_asts.append(np.array([1.0, 1.0])) # 못 찾으면 멀리 있는 것으로 처리
+            nearest_asts.append(np.array([1.0, 1.0]))
 
         obs = np.array([
             self.carrier.vel[0] / 10.0,
@@ -66,55 +64,76 @@ class SpaceCarrierEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.carrier.reset()
+        self.current_step = 0
         self.station.spawn()
         for ast in self.asteroids:
             ast.spawn(self.carrier.pos)
         
+        self.prev_dist = np.linalg.norm(self.carrier.pos - self.station.pos)
         return self._get_obs(), {}
 
     def step(self, action):
-        # ... (생략된 이전 로직들)
-        # 2. 업데이트
+        self.current_step += 1
+        # [초등학교 모드] 관성 강화 (이제 스스로 멈춰야 함)
+        self.carrier.angular_vel *= 1.0 
+        
+        rad = math.radians(self.carrier.angle)
+        # 연료 소모 실제 적용
+        if action == 1: self.carrier.apply_thrust(np.array([math.cos(rad), -math.sin(rad)]) * self.carrier.thrust_power, True)
+        elif action == 2: self.carrier.apply_thrust(np.array([-math.cos(rad), math.sin(rad)]) * self.carrier.rcs_power)
+        elif action == 3: self.carrier.apply_rotation(1)
+        elif action == 4: self.carrier.apply_rotation(-1)
+        elif action == 5: self.carrier.apply_thrust(np.array([math.cos(rad+math.pi/2), -math.sin(rad+math.pi/2)]) * self.carrier.rcs_power)
+        elif action == 6: self.carrier.apply_thrust(np.array([math.cos(rad-math.pi/2), -math.sin(rad-math.pi/2)]) * self.carrier.rcs_power)
+
         self.carrier.update()
-        # [수정] env에서도 감쇠 제거 확인 (이미 sim의 Carrier 클래스를 쓰지만 명시적 확인)
         for ast in self.asteroids:
             ast.update(self.carrier.pos)
 
-        # 3. 보상 및 종료 조건
-        reward = -0.01 # 기본 시간 패널티
+        # 보상 계산
+        reward = -0.01 # 기본 생존 패널티
         terminated = False
         truncated = False
-        
-        # [개선] 거리 보상: 이전 거리보다 가까워지면 보상
+
+        # [수정] 행동 패널티 제거 (AI가 일단 움직이게 함)
+        # if action != 0: reward -= 0.05 
+
         dist_to_station = np.linalg.norm(self.carrier.pos - self.station.pos)
-        if hasattr(self, 'prev_dist'):
-            reward += (self.prev_dist - dist_to_station) * 0.1 # 가까워진 만큼 보상
+        # [상향] 전진 보상 (0.2 -> 0.5): 정거장으로 가는 동기 대폭 강화
+        reward += (self.prev_dist - dist_to_station) * 0.5 
         self.prev_dist = dist_to_station
 
-        # 충돌 패널티 (더 강력하게)
+        # 충돌 검사
         hit_ast = check_collision(self.carrier, self.asteroids)
         if hit_ast:
-            reward -= 10.0 # 강한 감점
-            self.carrier.hull_integrity -= 10
-            hit_ast.spawn(self.carrier.pos)
+            reward -= 10.0 # 벌점 완화 (너무 무서워하지 않게)
+            self.carrier.hull_integrity -= 10.0
             if self.carrier.hull_integrity <= 0:
-                reward -= 100.0
+                reward -= 50.0
                 terminated = True
 
-        # 연료 부족 패널티
+        # 연료 고갈 패널티 (150 -> 50)
         if self.carrier.fuel <= 0:
             reward -= 50.0
             terminated = True
 
-        # 도킹 성공 보상 (확실한 보상)
-        speed = np.linalg.norm(self.carrier.vel)
+
+        # 도킹 판정
         if dist_to_station < 70:
+            speed = np.linalg.norm(self.carrier.vel)
             if speed < 1.0:
-                reward += 500.0 # 대박 보상
+                reward += 1000.0
+                # 남은 연료만큼 보너스 (연료 아끼기 유도)
+                reward += self.carrier.fuel * 2.0 
                 terminated = True
             else:
-                reward -= 1.0 # 속도가 너무 빠르면 감점
+                reward -= 2.0
 
+        if self.current_step >= self.max_steps:
+            truncated = True
+
+        keys = {pygame.K_w: action==1, pygame.K_s: action==2, pygame.K_a: action==3, 
+                pygame.K_d: action==4, pygame.K_q: action==5, pygame.K_e: action==6}
         if self.render_mode == "human":
             self.render(keys)
 
@@ -125,19 +144,11 @@ class SpaceCarrierEnv(gym.Env):
             pygame.init()
             self.screen = pygame.display.set_mode((1200, 800))
             self.clock = pygame.time.Clock()
-
-        if keys is None:
-            keys = {pygame.K_w: False, pygame.K_s: False, pygame.K_a: False, 
-                    pygame.K_d: False, pygame.K_q: False, pygame.K_e: False}
-
         self.screen.fill((0, 0, 0))
-        # sim.py의 로직을 그대로 사용 (시각화)
-        # 여기서는 생략하고 핵심만 구현
-        self.carrier.draw(self.screen, keys)
+        self.carrier.draw(self.screen, keys if keys else {})
         self.station.draw(self.screen, self.carrier.pos)
         for ast in self.asteroids:
             ast.draw(self.screen, self.carrier.pos)
-            
         pygame.display.flip()
         self.clock.tick(60)
 

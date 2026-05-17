@@ -18,7 +18,7 @@ class Carrier:
         self.mass = 100.0
         self.thrust_power = 0.8
         self.rcs_power = 0.2
-        self.rotation_power = 0.5 # [극단적 리얼리티] 매우 낮게 설정 (5.0 -> 0.5)
+        self.rotation_power = 0.5
         self.fuel_cons_main = 0.05
         self.fuel_cons_rcs = 0.01
 
@@ -42,15 +42,12 @@ class Carrier:
         if not self.is_alive or self.is_docked: return
         self.pos += self.vel
         self.angle = (self.angle + self.angular_vel) % 360
-        # [완벽한 리얼리티] 감쇠 0.0 (1.0 곱하기)
-        # 이제 회전은 외부 힘이 없으면 영원히 유지됩니다.
         self.angular_vel *= 1.0 
 
     def draw(self, screen, keys_dict):
         if not self.is_alive: return
         center, rad = (WIDTH // 2, HEIGHT // 2), math.radians(self.angle)
         if self.fuel > 0:
-            # W, S, Q, E 불꽃 (이전과 동일)
             if keys_dict.get(pygame.K_w):
                 p = center - np.array([math.cos(rad), -math.sin(rad)]) * (self.length/2+2)
                 pygame.draw.circle(screen, RED, (int(p[0]), int(p[1])), 7)
@@ -63,7 +60,6 @@ class Carrier:
             if keys_dict.get(pygame.K_e):
                 p = center + np.array([math.cos(rad+math.pi/2), -math.sin(rad+math.pi/2)]) * 12
                 pygame.draw.circle(screen, RED, (int(p[0]), int(p[1])), 3)
-            # A, D 불꽃
             if keys_dict.get(pygame.K_a):
                 p1 = center + np.array([math.cos(rad-0.8), -math.sin(rad-0.8)]) * 20
                 p2 = center - np.array([math.cos(rad+0.8), -math.sin(rad+0.8)]) * 20
@@ -136,42 +132,79 @@ def check_collision(carrier, asteroids):
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Space Carrier Command - High Realism")
+    pygame.display.set_caption("Space Carrier - Record & Learn")
     clock, font = pygame.time.Clock(), pygame.font.SysFont("Arial", 18)
     carrier, asteroids, station, stars = Carrier(), [Asteroid() for _ in range(40)], Station(), Starfield()
-    radar, ai_mode, model = Radar(carrier, asteroids, station), False, None
+    radar = Radar(carrier, asteroids, station)
     
+    # AI 및 녹화 관련
+    ai_mode, model = False, None
+    recording = False
+    recorded_obs, recorded_actions = [], []
+    
+    if os.path.exists("expert_data.npz"):
+        try:
+            data = np.load("expert_data.npz")
+            recorded_obs, recorded_actions = list(data['obs']), list(data['actions'])
+            print(f"Loaded existing data: {len(recorded_obs)} steps.")
+        except: pass
+
     flash_timer, running = 0, True
     while running:
         screen.fill(BLACK)
         for event in pygame.event.get():
             if event.type == pygame.QUIT: running = False
             if event.type == pygame.KEYDOWN:
-                if (not carrier.is_alive or carrier.is_docked) and event.key == pygame.K_r:
-                    carrier.reset(); station.spawn()
-                    for ast in asteroids: ast.spawn(carrier.pos)
                 if event.key == pygame.K_p:
                     ai_mode = not ai_mode
-                    if ai_mode and model is None:
+                    if ai_mode:
                         try:
                             from stable_baselines3 import PPO
-                            if os.path.exists("space_carrier_ppo.zip"): model = PPO.load("space_carrier_ppo")
-                        except: pass
+                            if os.path.exists("space_carrier_ppo.zip"):
+                                model = PPO.load("space_carrier_ppo")
+                                print("Latest AI Model Loaded.")
+                            else:
+                                print("No model found. Run imitate.py first.")
+                                ai_mode = False
+                        except:
+                            print("SB3 not installed.")
+                            ai_mode = False
+                if event.key == pygame.K_r:
+                    if recording:
+                        recording = False
+                        if len(recorded_obs) > 0:
+                            np.savez("expert_data.npz", obs=np.array(recorded_obs), actions=np.array(recorded_actions))
+                            print(f"Total data saved: {len(recorded_obs)} steps.")
+                    elif not carrier.is_alive or carrier.is_docked:
+                        carrier.reset(); station.spawn()
+                        for ast in asteroids: ast.spawn(carrier.pos)
+                    else:
+                        recording = True
+
+        rad = math.radians(carrier.angle)
+        rel_s = (station.pos - carrier.pos) / 3500.0
+        ast_rel = []
+        for ast in asteroids: ast_rel.append((ast.pos - carrier.pos) / 2500.0)
+        ast_rel.sort(key=lambda x: np.linalg.norm(x))
+        near_asts = ast_rel[:5]
+        while len(near_asts) < 5: near_asts.append(np.array([1.0, 1.0]))
+        obs = np.array([carrier.vel[0]/10, carrier.vel[1]/10, carrier.angular_vel/5, math.sin(rad), math.cos(rad), carrier.fuel/100, carrier.hull_integrity/100, rel_s[0], rel_s[1]] + [v for s in near_asts for v in s], dtype=np.float32)
 
         keys = pygame.key.get_pressed()
-        curr_keys = {k: keys[k] for k in [pygame.K_w, pygame.K_s, pygame.K_a, pygame.K_d, pygame.K_q, pygame.K_e]}
-        
         if ai_mode and model is not None and carrier.is_alive and not carrier.is_docked:
-            rad = math.radians(carrier.angle)
-            rel_s = (station.pos - carrier.pos) / 3500.0
-            ast_rel = []
-            for ast in asteroids: ast_rel.append((ast.pos - carrier.pos) / 2500.0)
-            ast_rel.sort(key=lambda x: np.linalg.norm(x))
-            near_asts = ast_rel[:5]
-            while len(near_asts) < 5: near_asts.append(np.array([1.0, 1.0]))
-            obs = np.array([carrier.vel[0]/10, carrier.vel[1]/10, carrier.angular_vel/5, math.sin(rad), math.cos(rad), carrier.fuel/100, carrier.hull_integrity/100, rel_s[0], rel_s[1]] + [v for s in near_asts for v in s], dtype=np.float32)
             action, _ = model.predict(obs, deterministic=True)
             curr_keys = {pygame.K_w: action==1, pygame.K_s: action==2, pygame.K_a: action==3, pygame.K_d: action==4, pygame.K_q: action==5, pygame.K_e: action==6}
+        else:
+            curr_keys = {k: keys[k] for k in [pygame.K_w, pygame.K_s, pygame.K_a, pygame.K_d, pygame.K_q, pygame.K_e]}
+            if recording and carrier.is_alive and not carrier.is_docked:
+                act = 0
+                if keys[pygame.K_w]: act = 1
+                elif keys[pygame.K_s]: act = 2
+                elif keys[pygame.K_a]: act = 3
+                elif keys[pygame.K_d]: act = 4
+                elif keys[pygame.K_q]: act = 5
+                elif keys[pygame.K_e]: act = 6
+                recorded_obs.append(obs); recorded_actions.append(act)
 
         if carrier.is_alive and not carrier.is_docked:
             rad = math.radians(carrier.angle)
@@ -188,8 +221,7 @@ def main():
             if hit:
                 carrier.hull_integrity -= hit.radius/2.0; flash_timer = 3; carrier.vel *= -0.3; hit.spawn(carrier.pos)
                 if carrier.hull_integrity <= 0: carrier.is_alive = False
-            dist_s = np.linalg.norm(carrier.pos - station.pos)
-            if dist_s < 70:
+            if np.linalg.norm(carrier.pos - station.pos) < 70:
                 if np.linalg.norm(carrier.vel) < 1.0: carrier.is_docked = True; carrier.vel *= 0
                 else: carrier.hull_integrity -= 5; carrier.vel *= -0.5; flash_timer = 3
 
@@ -198,11 +230,12 @@ def main():
         for ast in asteroids: ast.draw(screen, carrier.pos)
         carrier.draw(screen, curr_keys); radar.draw(screen)
         
-        info = [f"Hull: {max(0, carrier.hull_integrity):.1f}%", f"Fuel: {max(0, carrier.fuel):.1f}%", f"Speed: {np.linalg.norm(carrier.vel):.2f}", f"AI: {'ON' if ai_mode else 'OFF'}", "A/D to Initiate Rotation, Opposite Key to Stop"]
-        if carrier.fuel <= 0: info.append("!!! OUT OF FUEL !!!")
-        if not carrier.is_alive: info.append("!!! SHIP DESTROYED !!!")
-        if carrier.is_docked: info.append("=== DOCKING SUCCESSFUL ===")
-        for i, text in enumerate(info): screen.blit(font.render(text, True, WHITE), (20, 20 + i*25))
+        info = [f"AI: {'ON' if ai_mode else 'OFF'}", f"REC: {'ON' if recording else 'OFF'}", f"Hull: {max(0, carrier.hull_integrity):.1f}%", f"Fuel: {max(0, carrier.fuel):.1f}%"]
+        if ai_mode:
+            ai_f = pygame.font.SysFont("Arial", 30, bold=True)
+            screen.blit(ai_f.render("!!! AI PILOT ACTIVE !!!", True, YELLOW), (WIDTH//2 - 150, 50))
+        if recording: info.append(f"Recorded: {len(recorded_obs)}")
+        for i, text in enumerate(info): screen.blit(font.render(text, True, YELLOW if "REC" in text and recording else WHITE), (20, 20 + i*25))
         pygame.display.flip(); clock.tick(FPS)
     pygame.quit()
 

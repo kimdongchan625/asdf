@@ -3,18 +3,20 @@ from env import SpaceCarrierEnv
 import os
 
 def train():
-    # 환경 생성
-    env = SpaceCarrierEnv(render_mode=None) # 학습 시에는 렌더링 끔
+    env = SpaceCarrierEnv(render_mode=None)
+    model_path = "space_carrier_ppo"
     
-    # 모델 정의 (PPO 알고리즘 사용)
-    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_carrier_tensorboard/")
+    if os.path.exists(model_path + ".zip"):
+        print(f"Loading existing model: {model_path}")
+        model = PPO.load(model_path, env=env, verbose=1, tensorboard_log="./ppo_carrier_tensorboard/")
+    else:
+        print("No existing model found. Creating a new one.")
+        model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_carrier_tensorboard/")
 
-    # 학습 시작 (100만 스텝으로 상향)
     print("Training started...")
-    model.learn(total_timesteps=1000000)
+    model.learn(total_timesteps=1000000, reset_num_timesteps=False) # reset_num_timesteps=False로 설정하여 학습 기록 유지
     
-    # 모델 저장
-    model.save("space_carrier_ppo")
+    model.save(model_path)
     print("Training finished and model saved.")
 
 def test():
