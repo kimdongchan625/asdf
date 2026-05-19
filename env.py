@@ -90,44 +90,61 @@ class SpaceCarrierEnv(gym.Env):
         for ast in self.asteroids:
             ast.update(self.carrier.pos)
 
-        # 보상 계산
+        # 보상 계산 (단계별 목표 지향 학습 - Reward Shaping)
         reward = -0.01 # 기본 생존 패널티
         terminated = False
         truncated = False
 
-        # [수정] 행동 패널티 제거 (AI가 일단 움직이게 함)
-        # if action != 0: reward -= 0.05 
-
         dist_to_station = np.linalg.norm(self.carrier.pos - self.station.pos)
-        # [상향] 전진 보상 (0.2 -> 0.5): 정거장으로 가는 동기 대폭 강화
+        speed = np.linalg.norm(self.carrier.vel)
+
+        # 1. 목표를 향해 기수를 돌리는 것에 대한 보상 (Alignment)
+        if dist_to_station > 0:
+            target_vec = (self.station.pos - self.carrier.pos) / dist_to_station
+            # 우주선의 현재 기수 방향 벡터
+            heading_vec = np.array([math.cos(rad), -math.sin(rad)])
+            # 두 벡터의 내적 (1에 가까울수록 정면, -1이면 반대)
+            alignment = np.dot(target_vec, heading_vec)
+            reward += alignment * 0.1 # 올바른 방향을 볼 때 지속적인 소량의 보상
+
+        # 2. 목표를 향해 전진하는 보상
         reward += (self.prev_dist - dist_to_station) * 0.5 
         self.prev_dist = dist_to_station
 
-        # 충돌 검사
+        # 2-1. 정거장 근처(500px 이내)에 오면 속도를 줄이도록 유도
+        if dist_to_station < 500:
+            # 거리가 가까울수록 허용되는 안전 속도가 낮아짐
+            safe_speed = max(1.0, dist_to_station / 100.0) 
+            if speed > safe_speed:
+                reward -= (speed - safe_speed) * 0.1 # 과속 감점
+
+        # 3. 소행성 회피 및 충돌 패널티
         hit_ast = check_collision(self.carrier, self.asteroids)
         if hit_ast:
-            reward -= 10.0 # 벌점 완화 (너무 무서워하지 않게)
+            reward -= 20.0 # 강한 감점 복구
             self.carrier.hull_integrity -= 10.0
             if self.carrier.hull_integrity <= 0:
                 reward -= 50.0
                 terminated = True
 
-        # 연료 고갈 패널티 (150 -> 50)
+        # 소행성에 너무 가까이 가면 미세한 경고 감점 (회피 유도)
+        for ast in self.asteroids:
+            if np.linalg.norm(self.carrier.pos - ast.pos) < ast.radius + 100:
+                reward -= 0.1
+
+        # 연료 고갈 패널티
         if self.carrier.fuel <= 0:
             reward -= 50.0
             terminated = True
 
-
         # 도킹 판정
         if dist_to_station < 70:
-            speed = np.linalg.norm(self.carrier.vel)
-            if speed < 1.0:
+            if speed < 1.5: # 약간 넉넉한 도킹 속도
                 reward += 1000.0
-                # 남은 연료만큼 보너스 (연료 아끼기 유도)
                 reward += self.carrier.fuel * 2.0 
                 terminated = True
             else:
-                reward -= 2.0
+                reward -= 10.0 # 충돌 처리
 
         if self.current_step >= self.max_steps:
             truncated = True
